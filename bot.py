@@ -2,8 +2,10 @@ import os
 import re
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
-URL = "https://grindmap.com/gta-online-weekly-update"
+BASE_URL = "https://www.rockstargames.com"
+NEWSWIRE_URL = "https://www.rockstargames.com/br/newswire"
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 
@@ -11,9 +13,9 @@ def clean(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def get_page():
+def get_page(url):
     response = requests.get(
-        URL,
+        url,
         timeout=30,
         headers={
             "User-Agent": "GTA-Online-Discord-Bot/1.0"
@@ -23,262 +25,145 @@ def get_page():
     return BeautifulSoup(response.text, "html.parser")
 
 
-def find_section(soup, keywords, limit=1000):
-    for heading in soup.find_all(["h2", "h3"]):
-        title = clean(
-            heading.get_text(" ", strip=True)
-        ).lower()
+def find_latest_gta_article(soup):
+    """
+    Procura links recentes do GTA Online no Boletim brasileiro.
+    """
 
-        if any(keyword.lower() in title for keyword in keywords):
-            parts = []
+    candidates = []
 
-            for element in heading.find_all_next():
-                if element.name in ("h2", "h3") and element is not heading:
-                    break
+    for link in soup.find_all("a", href=True):
 
-                text = clean(
-                    element.get_text(" ", strip=True)
-                )
+        title = clean(link.get_text(" ", strip=True))
+        href = link.get("href", "")
 
-                if text and text not in parts:
-                    parts.append(text)
+        if not title:
+            continue
 
-                if len(" ".join(parts)) >= limit:
-                    break
+        full_url = urljoin(BASE_URL, href)
 
-            return clean(" ".join(parts))[:limit]
+        # Só queremos páginas do Newswire
+        if "/br/newswire/article/" not in full_url:
+            continue
 
-    return ""
+        # Ignora links claramente relacionados a GTA VI
+        if "gta vi" in title.lower():
+            continue
 
+        candidates.append({
+            "title": title,
+            "url": full_url
+        })
 
-def get_week(soup):
-    text = clean(
-        soup.get_text(" ", strip=True)
-    )
+    # Remove duplicados
+    unique = []
+    seen = set()
 
-    months = (
-        r"(?:January|February|March|April|May|June|"
-        r"July|August|September|October|November|December)"
-    )
+    for item in candidates:
+        if item["url"] not in seen:
+            seen.add(item["url"])
+            unique.append(item)
 
-    match = re.search(
-        rf"({months}\s+\d{{1,2}}\s+"
-        rf"(?:to|-|–)\s+"
-        rf"(?:{months}\s+)?\d{{1,2}},\s+\d{{4}})",
-        text,
-        re.I
-    )
-
-    if match:
-        return match.group(1)
-
-    return "Atualização semanal"
+    return unique[0] if unique else None
 
 
-def find_value(text, patterns):
-    for pattern in patterns:
-        match = re.search(
-            pattern,
-            text,
-            re.I
+def extract_article(url):
+    soup = get_page(url)
+
+    title = ""
+
+    # Título principal
+    h1 = soup.find("h1")
+
+    if h1:
+        title = clean(h1.get_text(" ", strip=True))
+
+    if not title and soup.title:
+        title = clean(soup.title.get_text(" ", strip=True))
+
+    # Texto do artigo
+    paragraphs = []
+
+    for element in soup.find_all(["p", "li"]):
+
+        text = clean(
+            element.get_text(" ", strip=True)
         )
 
-        if match:
-            return clean(match.group(1))
+        if text and text not in paragraphs:
+            paragraphs.append(text)
 
-    return "Veja a atualização completa."
-
-
-def translate_common(text):
-    translations = [
-        ("Money bonuses this week", "Bônus de dinheiro desta semana"),
-        ("Money bonuses", "Bônus de dinheiro"),
-        ("Events and freebies", "Eventos e itens grátis"),
-        ("Freebies", "Itens grátis"),
-        ("Discounts worth taking", "Descontos da semana"),
-        ("Discounts", "Descontos"),
-        ("Podium Vehicle", "Veículo do Pódio"),
-        ("Prize Ride", "Prêmio da Semana"),
-        ("GTA$ & RP", "GTA$ e RP"),
-        ("GTA$ and RP", "GTA$ e RP"),
-        ("Rewards", "Recompensas"),
-        ("Reward", "Recompensa"),
-        ("Bonuses", "Bônus"),
-        ("Bonus", "Bônus"),
-        ("Sell Missions", "Missões de venda"),
-        ("Missions", "Missões"),
-        ("Mission", "Missão"),
-        ("Challenges", "Desafios"),
-        ("Challenge", "Desafio"),
-        ("Races", "Corridas"),
-        ("Race", "Corrida"),
-        ("Events", "Eventos"),
-        ("Free", "Grátis"),
-    ]
-
-    result = text
-
-    for english, portuguese in translations:
-        result = re.sub(
-            rf"\b{re.escape(english)}\b",
-            portuguese,
-            result,
-            flags=re.I
-        )
-
-    return clean(result)
-
-
-def translate_months(text):
-    months = {
-        "January": "janeiro",
-        "February": "fevereiro",
-        "March": "março",
-        "April": "abril",
-        "May": "maio",
-        "June": "junho",
-        "July": "julho",
-        "August": "agosto",
-        "September": "setembro",
-        "October": "outubro",
-        "November": "novembro",
-        "December": "dezembro"
-    }
-
-    for english, portuguese in months.items():
-        text = re.sub(
-            english,
-            portuguese,
-            text,
-            flags=re.I
-        )
-
-    return text
-
-
-def extract_data(soup):
-    text = clean(
-        soup.get_text(" ", strip=True)
-    )
-
-    podium = find_value(
-        text,
-        [
-            r"podium vehicle.*?is\s+(?:the\s+)?"
-            r"([A-Z][^.]{2,70}?)(?:\.|$)",
-
-            r"podium.*?vehicle.*?:\s*"
-            r"([A-Z][^.]{2,70}?)(?:\.|$)"
-        ]
-    )
-
-    prize = find_value(
-        text,
-        [
-            r"prize ride.*?(?:is|unlock)\s+"
-            r"(?:the\s+)?([A-Z][^.]{2,70}?)(?:\.|$)",
-
-            r"prize ride.*?:\s*"
-            r"([A-Z][^.]{2,70}?)(?:\.|$)"
-        ]
-    )
-
-    bonuses = find_section(
-        soup,
-        [
-            "Money bonuses this week",
-            "Money bonuses",
-            "Bonuses"
-        ]
-    )
-
-    events = find_section(
-        soup,
-        [
-            "Events and freebies",
-            "Events",
-            "Freebies"
-        ]
-    )
-
-    discounts = find_section(
-        soup,
-        [
-            "Discounts worth taking",
-            "Discounts",
-            "Discount"
-        ]
-    )
+    article_text = " ".join(paragraphs)
 
     return {
-        "podium": podium,
-        "prize": prize,
-        "bonuses": (
-            bonuses
-            or events
-            or "Veja a atualização completa."
-        ),
-        "discounts": (
-            discounts
-            or "Veja a atualização completa."
-        )
+        "title": title or "Atualização do GTA Online",
+        "text": article_text[:4000],
+        "url": url
     }
 
 
-def send_discord(week, data):
+def make_summary(text):
+    """
+    Seleciona os primeiros trechos relevantes do artigo.
+    """
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+",
+        text
+    )
+
+    selected = []
+
+    for sentence in sentences:
+
+        sentence = clean(sentence)
+
+        if len(sentence) < 30:
+            continue
+
+        selected.append(sentence)
+
+        if len(" ".join(selected)) >= 900:
+            break
+
+    if not selected:
+        return "Confira a atualização completa no Boletim da Rockstar Games."
+
+    return clean(" ".join(selected))[:1000]
+
+
+def send_discord(article):
+
+    summary = make_summary(
+        article["text"]
+    )
 
     embed = {
-        "title": "🎮 GTA ONLINE — ATUALIZAÇÃO SEMANAL",
+        "title": "🎮 GTA ONLINE — ATUALIZAÇÃO SEMANAL 🇧🇷",
 
         "description": (
-            f"📅 **{translate_months(week)}**\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🇧🇷 Confira os principais "
-            "destaques desta semana!"
+            f"**{article['title']}**\n\n"
+            f"{summary}"
         ),
+
+        "url": article["url"],
 
         "color": 0x9146FF,
 
         "fields": [
-
             {
-                "name": "💰  BÔNUS DA SEMANA",
-                "value": translate_common(
-                    data["bonuses"]
-                )[:1024],
-                "inline": False
-            },
-
-            {
-                "name": "🎰  VEÍCULO DO PÓDIO",
+                "name": "📰 Fonte oficial",
                 "value": (
-                    f"**{data['podium'][:900]}**"
+                    f"[Rockstar Games — Boletim]({article['url']})"
                 ),
-                "inline": False
-            },
-
-            {
-                "name": "🏆  PRÊMIO DA SEMANA",
-                "value": (
-                    f"**{data['prize'][:900]}**"
-                ),
-                "inline": False
-            },
-
-            {
-                "name": "🏷️  DESCONTOS",
-                "value": translate_common(
-                    data["discounts"]
-                )[:1024],
                 "inline": False
             }
-
         ],
 
         "footer": {
             "text":
                 "GTA Online News 🇧🇷 • "
-                "Atualizado automaticamente toda quinta-feira"
+                "Fonte: Rockstar Games"
         }
     }
 
@@ -286,8 +171,7 @@ def send_discord(week, data):
         "username": "GTA Online News 🇧🇷",
 
         "content":
-            "🚨 **NOVA ATUALIZAÇÃO SEMANAL "
-            "DO GTA ONLINE! 🇧🇷**",
+            "🚨 **NOVA ATUALIZAÇÃO DO GTA ONLINE! 🇧🇷**",
 
         "embeds": [embed],
 
@@ -310,23 +194,39 @@ def main():
     if not WEBHOOK:
         raise SystemExit(
             "A Secret DISCORD_WEBHOOK_URL "
-            "não foi encontrada no GitHub."
+            "não foi encontrada."
         )
 
-    soup = get_page()
+    print("Consultando Rockstar Games Brasil...")
 
-    week = get_week(soup)
+    soup = get_page(
+        NEWSWIRE_URL
+    )
 
-    data = extract_data(soup)
+    article = find_latest_gta_article(
+        soup
+    )
+
+    if not article:
+        raise SystemExit(
+            "Nenhum artigo do GTA Online foi encontrado."
+        )
+
+    print(
+        "Artigo encontrado:",
+        article["title"]
+    )
+
+    article_data = extract_article(
+        article["url"]
+    )
 
     send_discord(
-        week,
-        data
+        article_data
     )
 
     print(
-        "Atualização em português "
-        "enviada para o Discord!"
+        "Atualização enviada para o Discord!"
     )
 
 
