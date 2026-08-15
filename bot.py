@@ -1,20 +1,27 @@
 import os
 import re
 import requests
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# Página oficial da Rockstar Brasil filtrada para GTA Online
-ROCKSTAR_URL = "https://www.rockstargames.com/br/newswire?tag_id=702"
+RSS_URL = (
+    "https://news.google.com/rss/search?"
+    "q=site%3Arockstargames.com%2Fbr%2Fnewswire%2Farticle%20"
+    "GTA%20Online"
+    "&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+)
+
+ROCKSTAR_DOMAIN = "https://www.rockstargames.com"
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 Chrome/130 Safari/537.36"
     ),
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9"
 }
 
 
@@ -22,7 +29,7 @@ def clean(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def get_page(url):
+def get(url):
     response = requests.get(
         url,
         headers=HEADERS,
@@ -34,53 +41,108 @@ def get_page(url):
     return response.text
 
 
-def find_articles(html):
+def find_rockstar_url(text):
     """
-    Procura URLs de artigos da Rockstar dentro do HTML.
+    Procura diretamente URLs de artigos da Rockstar Brasil.
     """
 
-    pattern = r'https?://www\.rockstargames\.com/br/newswire/article/[A-Za-z0-9_-]+/[^"\s<>]+'
-
-    urls = re.findall(pattern, html)
-
-    # Também procura URLs relativas
-    relative_pattern = r'/br/newswire/article/[A-Za-z0-9_-]+/[^"\s<>]+'
-
-    relative_urls = re.findall(
-        relative_pattern,
-        html
+    pattern = (
+        r"https?://www\.rockstargames\.com/br/newswire/article/"
+        r"[A-Za-z0-9_-]+/[^\"<>\s]+"
     )
 
-    urls.extend(
-        urljoin(
-            "https://www.rockstargames.com",
-            url
+    match = re.search(
+        pattern,
+        text
+    )
+
+    if match:
+        return match.group(0)
+
+    return None
+
+
+def get_latest_article():
+
+    print("Consultando notícias da Rockstar Brasil...")
+
+    rss = get(RSS_URL)
+
+    root = ET.fromstring(rss)
+
+    items = root.findall(".//item")
+
+    print(
+        f"Notícias encontradas no feed: {len(items)}"
+    )
+
+    for item in items:
+
+        title_element = item.find("title")
+        link_element = item.find("link")
+        description_element = item.find("description")
+
+        title = clean(
+            title_element.text
+            if title_element is not None
+            else ""
         )
-        for url in relative_urls
+
+        link = (
+            link_element.text.strip()
+            if link_element is not None
+            and link_element.text
+            else ""
+        )
+
+        description = (
+            description_element.text
+            if description_element is not None
+            and description_element.text
+            else ""
+        )
+
+        combined = (
+            title
+            + " "
+            + link
+            + " "
+            + description
+        )
+
+        rockstar_url = find_rockstar_url(
+            combined
+        )
+
+        if rockstar_url:
+
+            # Remove possíveis parâmetros do Google
+            rockstar_url = rockstar_url.split("?")[0]
+
+            return {
+                "title": title,
+                "url": rockstar_url
+            }
+
+    return None
+
+
+def get_article(url):
+
+    print(
+        "Abrindo artigo da Rockstar:"
     )
 
-    # Remove duplicados mantendo a ordem
-    result = []
-    seen = set()
+    print(url)
 
-    for url in urls:
-        url = url.replace("&amp;", "&")
-
-        if url not in seen:
-            seen.add(url)
-            result.append(url)
-
-    return result
-
-
-def get_article_info(url):
-    html = get_page(url)
+    html = get(url)
 
     soup = BeautifulSoup(
         html,
         "html.parser"
     )
 
+    # Título
     title = ""
 
     h1 = soup.find("h1")
@@ -101,20 +163,20 @@ def get_article_info(url):
             )
         )
 
-    # Procura a data
+    # Data
     date = ""
 
-    time_tag = soup.find("time")
+    time_element = soup.find("time")
 
-    if time_tag:
+    if time_element:
         date = clean(
-            time_tag.get_text(
+            time_element.get_text(
                 " ",
                 strip=True
             )
         )
 
-    # Texto do artigo
+    # Texto
     paragraphs = []
 
     for element in soup.find_all(
@@ -128,57 +190,32 @@ def get_article_info(url):
             )
         )
 
-        if len(text) < 20:
+        if len(text) < 25:
             continue
 
         if text not in paragraphs:
             paragraphs.append(text)
 
-    text = " ".join(paragraphs)
+    article_text = " ".join(
+        paragraphs
+    )
 
     return {
         "title": title,
         "date": date,
-        "text": text,
+        "text": article_text,
         "url": url
     }
 
 
-def is_gta_online(article):
-    """
-    Confirma que o artigo é sobre GTA Online.
-    """
-
-    title = article["title"].lower()
-
-    gta_words = [
-        "gta online",
-        "grand theft auto online",
-        "evento",
-        "bônus",
-        "bônus",
-        "gta$",
-        "rp",
-    ]
-
-    return any(
-        word in title
-        for word in gta_words
-    )
-
-
-def make_summary(text):
-    """
-    Cria um resumo simples em português,
-    preservando o texto original da Rockstar.
-    """
+def create_summary(text):
 
     text = clean(text)
 
     if not text:
         return (
             "Confira todos os detalhes "
-            "na página oficial da Rockstar Games."
+            "no artigo oficial da Rockstar Games."
         )
 
     sentences = re.split(
@@ -186,92 +223,35 @@ def make_summary(text):
         text
     )
 
-    result = []
+    selected = []
 
     for sentence in sentences:
 
-        sentence = clean(sentence)
+        sentence = clean(
+            sentence
+        )
 
         if len(sentence) < 35:
             continue
 
-        result.append(sentence)
+        selected.append(
+            sentence
+        )
 
-        if len(" ".join(result)) >= 900:
+        if len(
+            " ".join(selected)
+        ) >= 900:
             break
 
-    summary = clean(
-        " ".join(result)
-    )
-
-    return summary[:1000]
-
-
-def find_latest_article():
-
-    print(
-        "Consultando Rockstar Games Brasil..."
-    )
-
-    html = get_page(
-        ROCKSTAR_URL
-    )
-
-    urls = find_articles(
-        html
-    )
-
-    print(
-        f"Links encontrados: {len(urls)}"
-    )
-
-    if not urls:
-        return None
-
-    articles = []
-
-    for url in urls[:15]:
-
-        try:
-
-            article = get_article_info(
-                url
-            )
-
-            if not article["title"]:
-                continue
-
-            if is_gta_online(
-                article
-            ):
-                articles.append(
-                    article
-                )
-
-        except Exception as error:
-
-            print(
-                "Erro ao ler artigo:",
-                error
-            )
-
-    if not articles:
-        return None
-
-    return articles[0]
+    return clean(
+        " ".join(selected)
+    )[:1000]
 
 
 def send_discord(article):
 
-    summary = make_summary(
+    summary = create_summary(
         article["text"]
-    )
-
-    title = article["title"]
-
-    description = (
-        f"📅 **{article['date']}**\n\n"
-        f"{summary}"
     )
 
     embed = {
@@ -280,7 +260,10 @@ def send_discord(article):
             "ATUALIZAÇÃO SEMANAL 🇧🇷"
         ),
 
-        "description": description,
+        "description": (
+            f"## {article['title']}\n\n"
+            f"{summary}"
+        ),
 
         "url": article["url"],
 
@@ -288,10 +271,10 @@ def send_discord(article):
 
         "fields": [
             {
-                "name": "📰 Notícia oficial",
+                "name": "📰 FONTE OFICIAL",
                 "value": (
-                    f"[Ler no Boletim da "
-                    f"Rockstar Games]({article['url']})"
+                    "[Rockstar Games Brasil]"
+                    f"({article['url']})"
                 ),
                 "inline": False
             }
@@ -300,7 +283,7 @@ def send_discord(article):
         "footer": {
             "text": (
                 "GTA Online News 🇧🇷 • "
-                "Fonte oficial: Rockstar Games"
+                "Fonte: Rockstar Games"
             )
         }
     }
@@ -331,7 +314,7 @@ def send_discord(article):
     response.raise_for_status()
 
     print(
-        "Mensagem enviada para o Discord!"
+        "✅ Mensagem enviada para o Discord!"
     )
 
 
@@ -339,29 +322,39 @@ def main():
 
     if not WEBHOOK:
         raise SystemExit(
-            "ERRO: a Secret "
+            "❌ A Secret "
             "DISCORD_WEBHOOK_URL "
             "não foi encontrada."
         )
 
-    article = find_latest_article()
+    article = get_latest_article()
 
     if not article:
         raise SystemExit(
-            "Nenhum artigo recente "
-            "do GTA Online foi encontrado."
+            "❌ Não foi possível encontrar "
+            "um artigo da Rockstar Brasil."
         )
 
     print(
-        "Artigo encontrado:"
+        "✅ Artigo encontrado:"
     )
 
     print(
         article["title"]
     )
 
+    article_data = get_article(
+        article["url"]
+    )
+
+    if not article_data["text"]:
+        raise SystemExit(
+            "❌ O artigo foi encontrado, "
+            "mas não foi possível ler o conteúdo."
+        )
+
     send_discord(
-        article
+        article_data
     )
 
 
